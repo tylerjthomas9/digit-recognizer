@@ -1,0 +1,299 @@
+---
+title: "Digit Recognizer"
+author: "Tyler Thomas"
+date: "3/15/2019"
+output: pdf_document
+---
+
+## Introduction
+
+A good news for R is Tensorflow can be worked in R and Rstudio. I want to try it and use this dataset to build a Convolution Nerual Network. It will be fun for every R user.
+
+## Package
+
+The package of R tensorflow can help R user to build deep learning neural network.
+
+```{r}
+check.packages <- function(pkg){
+    new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+    if (length(new.pkg)) 
+        install.packages(new.pkg, dependencies = TRUE)
+    sapply(pkg, require, character.only = TRUE)
+}
+packages<-c("tensorflow", "magrittr")
+check.packages(packages)
+```
+
+## Data input
+
+In the first, I picked 70% of train data for training, and 30% of train data for validation.
+
+```{r}
+# data mungung
+Mnist_train <- read.csv(file = "train.csv")
+## separate new train data and new test data for model training
+set.seed(2018)
+n <- nrow(Mnist_train)
+### 70% for train
+n_train <- round(0.7*n) 
+### sample for train
+index_train <- sample(seq_len(n), size = n_train)
+### new train data
+Mnist_train_70PR <- Mnist_train[index_train,]
+### new validation data for train data
+Mnist_train_30PR <- Mnist_train[-index_train,]
+```
+
+Secondly, I need to separate each image labels and transform dataframe to matrix because the matrix is more flexible than dataframe.
+
+```{r}
+## Label extraction
+Mnist_label_70PR <- Mnist_train_70PR[,1] # for 70PR train data
+Mnist_label_30PR <- Mnist_train_30PR[,1] # for 30PR train data
+# Image exraction
+Mnist_train_image_70PR <- Mnist_train_70PR[,-1]/256
+Mnist_train_image_30PR <- Mnist_train_30PR[,-1]/256
+
+Matrix_Mnist_train_image_70PR <- as.matrix(Mnist_train_image_70PR)
+Matrix_Mnist_train_image_30PR <- as.matrix(Mnist_train_image_30PR)
+
+```
+
+Finally, I need to Flatten the label data, and create a new matrix.
+
+```{r}
+# Label matrix rebuilding for 70PR
+MnistLabel_70PR <- data.frame(Mnist_label_70PR)
+for(i in c(0:9)){
+  newCol <- ifelse(MnistLabel_70PR$Mnist_label == i,
+                   1,
+                   0)
+  MnistLabel_70PR <- cbind(MnistLabel_70PR, newCol)
+}
+names(MnistLabel_70PR)[2:11] <- c(0:9)
+Matrix_MNIST_label_70PR <- as.matrix(MnistLabel_70PR[,-1])
+
+# Label matrix rebuilding for 30PR
+MnistLabel_30PR <- data.frame(Mnist_label_30PR)
+for(i in c(0:9)){
+  newCol <- ifelse(MnistLabel_30PR$Mnist_label == i,
+                   1,
+                   0)
+  MnistLabel_30PR <- cbind(MnistLabel_30PR, newCol)
+}
+names(MnistLabel_30PR)[2:11] <- c(0:9)
+Matrix_MNIST_label_30PR <- as.matrix(MnistLabel_30PR[,-1])
+```
+
+## Model building
+
+### Function definition
+
+In my convolution nerual netork, including of 2 convolution layers, 2 max pooling layers, 1 flatten layer and 2 fully-connected layers. Therefore, function definition is the better way to make my work become easy. 
+
+
+```{r}
+# Define function for filter
+# [filter_height, filter_width, in_channels, out_channels]
+add_conv_filter <- function(filterShape){ # random filter as Variable
+  filterForConvLayer <- tf$truncated_normal(filterShape, stddev = 0.1) %>% tf$Variable() 
+  return(filterForConvLayer)
+}
+# Define function for bias
+add_bias <- function(BiasShape){
+  bias <- tf$constant(0.1, shape = BiasShape) %>% tf$Variable()
+  return(bias)
+}
+# Define function for convolution layer
+add_convolutionLayer <- function(inputData, filter_weight, activation_function = "None"){
+  conv2dLayer <- tf$nn$conv2d(input = inputData, # input data
+                              # filter should be shape(filter_height, filter_width, in_channels, out_channels)
+                              filter = filter_weight, 
+                              strides = shape(1L, 2L, 2L, 1L), # strides = [1, x_strides, y_strides, 1]
+                              padding = 'SAME'
+  )
+  if(activation_function == "None"){
+    output_result <- conv2dLayer %>% tf$nn$dropout(., keep_prob = keep_prob_s)
+  }else{
+    output_result <- conv2dLayer %>% tf$nn$dropout(., keep_prob = keep_prob_s) %>% activation_function()
+  }
+  return(output_result)
+}
+# Define function for Max pooling layer
+add_maxpoolingLayer <- function(inputData){
+  MaxPooling <- tf$nn$max_pool(inputData, # input data should be [batch, height, width, channels]
+                               ksize = shape(1L, 2L, 2L, 1L), # 2*2 pixels for max pooling
+                               strides = shape(1L, 2L, 2L, 1L), # strides =  [1, x_strides, y_strides, 1]
+                               padding = 'SAME')
+  return(MaxPooling)
+}
+# Define function for flatten layer
+add_flattenLayer <- function(inputData, numberOfFactors){
+  flatten_layer <- tf$reshape(inputData, shape(-1, numberOfFactors))
+  return(flatten_layer)
+}
+# Define function for fully connected layer
+add_fullyConnectedLayer <- function(inputData, Weight_FCLayer, bias_FCLayer, activation_function = "None"){
+  Wx_plus_b <- tf$matmul(inputData, Weight_FCLayer)+bias_FCLayer
+  if(activation_function == "None"){
+    FC_output_result <- Wx_plus_b %>% tf$nn$dropout(., keep_prob = keep_prob_s)
+  }else{
+    FC_output_result <- Wx_plus_b %>% tf$nn$dropout(., keep_prob = keep_prob_s) %>% activation_function()
+  }
+  return(FC_output_result)
+}
+```
+
+Building a function to evaluate the performance of training.
+
+```{r}
+
+# Define compute_accuracy function
+compute_accuracy <- function(model_result, v_xs, v_ys){
+  y_pre <- sess$run(model_result, feed_dict = dict(xs = v_xs, keep_prob_s= 1))
+  correct_prediction <- tf$equal(tf$argmax(y_pre, 1L), tf$argmax(v_ys, 1L))
+  accuracy <- tf$cast(correct_prediction, tf$float32) %>% tf$reduce_mean(.)
+  result <- sess$run(accuracy, feed_dict = dict(xs = v_xs, ys = v_ys, keep_prob_s= 1))
+  return(result)
+}
+```
+
+### Placeholder
+
+```{r}
+## Setting placeholder
+xs <- tf$placeholder(tf$float32, shape(NULL, 784L)) # input data = 28*28(784 factors) pixels image.
+ys <- tf$placeholder(tf$float32, shape(NULL, 10L)) # output = 10 labels (0~9)
+keep_prob_s <- tf$placeholder(tf$float32)
+x_image <- tf$reshape(xs, shape(-1L, 28L, 28L, 1L)) # [batch, height, width, channels]
+```
+
+### Structure of model building
+
+> Convolution layer 1 → Maxpooling layer1 → Convolution layer 2 → Maxpooling layer 2 → Flatten layer → Fully-connected layer 1 →
+ Fully-connected layer 2
+
+
+```{r}
+## Convolution layer 1 
+convolayer1 <- add_convolutionLayer(
+  inputData = x_image,
+  filter_weight = shape(5L, 5L, 1L, 32L) %>% add_conv_filter(),
+  activation_function = tf$nn$relu
+)
+## Max pooling layer 1
+maxPooling_1 <- add_maxpoolingLayer(
+  convolayer1
+)
+## Convolution layer 2 
+convolayer2 <- add_convolutionLayer(
+  inputData = maxPooling_1, 
+  filter_weight = shape(4L, 4L, 32L, 64L) %>% add_conv_filter(),
+  activation_function = tf$nn$relu
+) 
+## Max pooling layer 2 
+maxPooling_2 <- add_maxpoolingLayer(
+  inputData = convolayer2
+)
+## Flatten layer
+flatLayer_output <- add_flattenLayer(
+  inputData = maxPooling_2,
+  numberOfFactors = c(2L*2L*64L) %>% as.numeric()
+)
+## Fully connected layer 1
+fcLayer_1 <- add_fullyConnectedLayer(
+  inputData = flatLayer_output,
+  Weight_FCLayer = shape(2L*2L*64L, 1024L) %>% 
+    tf$random_normal(., stddev = 0.1) %>% 
+    tf$Variable(), # Set first layer ouput = 1024
+  bias_FCLayer = shape(1024L) %>% add_bias(),
+  activation_function = tf$nn$relu
+)
+## Fully connected layer 2
+output_result <- add_fullyConnectedLayer(
+  inputData = fcLayer_1,
+  Weight_FCLayer = shape(1024L, 10L) %>% 
+    tf$random_normal(., stddev = 0.1) %>% 
+    tf$Variable(), # Set output layer ouput = 10 labels
+  bias_FCLayer = shape(10L) %>% add_bias(),
+  activation_function = tf$nn$softmax
+)
+
+```
+
+### Loss function and training update setting
+
+Using cross entropy and Adam to minimize it.
+
+learning rate = 0.001
+
+```{r}
+## Loss function (cross entropy)
+cross_entropy <- tf$reduce_mean(-tf$reduce_sum(ys*tf$log(output_result), 
+                                               reduction_indices = 1L))
+## Gradient Descent and learning rate setting
+learning_rate <- 0.001 # Set learning rate = 0.001
+train_step_by_GD <- tf$train$AdamOptimizer(learning_rate)$minimize(cross_entropy)
+
+
+```
+
+### Training
+
+Step 1 : setting initializer
+
+```{r}
+## Session setting
+sess <- tf$Session()
+init <- tf$global_variables_initializer()
+sess$run(init)
+```
+
+Step 2 : Training....
+
+```{r}
+# Running
+for (i in 1:3550){
+  batch_seq <- round(100) %>% sample(seq_len(nrow(Matrix_MNIST_label_70PR)), size = .) 
+  batches_xs <- Matrix_Mnist_train_image_70PR[batch_seq,]
+  batches_ys <- Matrix_MNIST_label_70PR[batch_seq,]
+  sess$run(train_step_by_GD, feed_dict = dict(xs = batches_xs, ys = batches_ys, keep_prob_s= 0.95))
+  if(i %% 50 == 0){
+    print(paste("Step =", i, "|| Training Accuracy =", compute_accuracy(output_result, Matrix_Mnist_train_image_70PR, Matrix_MNIST_label_70PR), sep = " "))
+    print("---")
+    print(paste("Step =", i, "|| Validation Accuracy =", compute_accuracy(output_result, Matrix_Mnist_train_image_30PR, Matrix_MNIST_label_30PR), sep = " "))
+    print("=================================================")
+  }
+}
+```
+
+## Prediction
+
+After Training, using this CNN to prediction Kaggle's test data is next step. However, data rearrangement for test data is necessary before prediction.
+
+It's easy because we just need to transform it to a matrix.
+
+```{r}
+# test data
+testData <- read.csv("test.csv")
+testData <- as.matrix(testData)
+```
+
+Then, go for prediction.
+
+```{r}
+Kaggle_Running <- data.frame(sess$run(output_result, feed_dict = dict(xs = testData, keep_prob_s = 1)))
+```
+
+After getting results from prediction, arrange new dataframe.
+
+```{r}
+names(Kaggle_Running) <- paste(c(0:9))
+Kaggle_answer <- c()
+for(i in 1:nrow(Kaggle_Running)){
+  n_answer <- names(which.max(Kaggle_Running[i,]))
+  Kaggle_answer <- c(Kaggle_answer, n_answer)
+}
+Kaggle_Running <- cbind(Kaggle_Running, Kaggle_answer)
+
+write.csv(Kaggle_Running[,11], "submission1.csv")
